@@ -87,6 +87,9 @@ def server(src_path: str) -> None:
         do_broadcast and do_broadcast.clear()
         server_sock and server_sock.close()
 
+def sample_print(*msg: str) -> None:
+    if random.random() > 0.99:
+        print(*msg)
 
 def client(dst_path: str) -> None:
     flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC
@@ -100,34 +103,47 @@ def client(dst_path: str) -> None:
     if sys.platform == "linux":
         # make the pipe bigger
         fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, max_pipe_size)
-        pipe_flags = fcntl(w_fd, fcntl.F_GETFL, 0) | os.O_NONBLOCK
-        fcntl.fcntl(w_fd, fcntl.F_SETFL, pipe_flags)
+        # pipe_flags = fcntl.fcntl(w_fd, fcntl.F_GETFL, 0) | os.O_NONBLOCK
+        # fcntl.fcntl(w_fd, fcntl.F_SETFL, pipe_flags)
         chunk_size = max_pipe_size
     # make the receive buffer bigger
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, chunk_size)
     fsize = 0
     chunks = 0
     buffered = 0
-    while True:
-        # transfer data from src to the write end of the pipe
-        # it stays in the kernel
-        bytes_in = os.splice(sock.fileno(), w_fd, chunk_size, flags=os.F_SPLICE_MOVE)
-        if random.random() > 0.995:  # sample .5% of messages
-            print("received", bytes_in / 1024, "kb")
-        if bytes_in == 0:  # EOF
-            break
-        chunks += 1
-        fsize += bytes_in
-        buffered += bytes_in
-        # if we only received a little data, wait until the pipe is full
-        if buffered >= chunk_size - 1:
-            # transfer data from the read end of the pipe to dst
-            # it doesn't go through userspace
-            buffered -= os.splice(r_fd, dst_fd, buffered, flags=os.F_SPLICE_MOVE)
-            if buffered != 0:
-                print("incomplete splice to disk")
-    sock.close()
-    print(f"{fsize / (time.perf_counter() - t) / 1024 / 1024:.5} MB/s, {chunks} chunks")
+    splice_flag = os.SPLICE_F_MOVE if os.getenv("MOVE") else 0 
+    should_drain = Event()
+
+    def drain_pipe():
+        while not should_drain.is_set():
+            sample_print("drain", os.splice(r_fd, dst_fd, chunk_size, flags=splice_flag) / 1024)
+
+    drain_thread = Thread(target=drain_pipe)
+    drain_thread.start()
+    try:
+        while True:
+            # transfer data from src to the write end of the pipe
+            # it stays in the kernel
+            bytes_in = os.splice(sock.fileno(), w_fd, chunk_size, flags=splice_flag)
+            if bytes_in == 0:  # EOF
+                break
+            sample_print("received", bytes_in / 1024, "kb")
+            chunks += 1
+            fsize += bytes_in
+            buffered += bytes_in
+            # if we only received a little data, wait until the pipe is full
+            # if buffered >= chunk_size - 1:
+            #     # transfer data from the read end of the pipe to dst
+            #     # it doesn't go through userspace
+            #     print("splice out", buffered)
+            #     buffered -= os.splice(r_fd, dst_fd, buffered, flags=splice_flag)
+            #     if buffered != 0:
+            #         print("incomplete splice to disk")
+    finally:
+        sock.close()
+        should_drain.set()
+        print(f"{fsize / (time.perf_counter() - t) / 1024 / 1024:.5} MB/s, {chunks} chunks")
+        drain_thread.join()
 
 
 if __name__ == "__main__":
