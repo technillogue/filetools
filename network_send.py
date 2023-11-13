@@ -99,7 +99,9 @@ def client(dst_path: str) -> None:
     r_fd, w_fd = os.pipe()
     if sys.platform == "linux":
         # make the pipe bigger
-        fcntl.fcntl(r_fd, fcntl.F_SETPIPE_SZ, max_pipe_size)
+        fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, max_pipe_size)
+        pipe_flags = fcntl(w_fd, fcntl.F_GETFL, 0) | os.O_NONBLOCK
+        fcntl.fcntl(w_fd, fcntl.F_SETFL, pipe_flags)
         chunk_size = max_pipe_size
     # make the receive buffer bigger
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, chunk_size)
@@ -109,7 +111,7 @@ def client(dst_path: str) -> None:
     while True:
         # transfer data from src to the write end of the pipe
         # it stays in the kernel
-        bytes_in = os.splice(sock.fileno(), w_fd, chunk_size)
+        bytes_in = os.splice(sock.fileno(), w_fd, chunk_size, flags=os.F_SPLICE_MOVE)
         if random.random() > 0.995:  # sample .5% of messages
             print("received", bytes_in / 1024, "kb")
         if bytes_in == 0:  # EOF
@@ -121,7 +123,9 @@ def client(dst_path: str) -> None:
         if buffered >= chunk_size - 1:
             # transfer data from the read end of the pipe to dst
             # it doesn't go through userspace
-            buffered -= os.splice(r_fd, dst_fd, buffered)
+            buffered -= os.splice(r_fd, dst_fd, buffered, flags=os.F_SPLICE_MOVE)
+            if buffered != 0:
+                print("incomplete splice to disk")
     sock.close()
     print(f"{fsize / (time.perf_counter() - t) / 1024 / 1024:.5} MB/s, {chunks} chunks")
 
